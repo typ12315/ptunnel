@@ -1,0 +1,34 @@
+# PortTunnel 客户端配置示例
+server:
+  addr: tunnel.example.com:8443
+  # 首次注册时若 CA 文件不存在，可用 fingerprint 固定服务端证书（sha256:...）
+  ca: /etc/ptunnel/ca.pem
+  fingerprint: ""
+  cert: /etc/ptunnel/client.crt
+  key: /etc/ptunnel/client.key
+  # 首次注册使用；注册成功后证书落地，token 即可删除
+  name: web01
+  enroll_token: ""
+
+tunnel:
+  reconnect_min: 1s
+  reconnect_max: 30s
+  heartbeat: 15s
+  idle_timeout: 5m
+  dial_timeout: 3s
+  # 一端结束后等待另一方向收尾的时长；短连接多时可调小，0 表示立即关闭
+  half_close_grace: 500ms
+
+# 本地硬限制：客户端只允许转发到这些网段（服务端配置无法突破）
+security:
+  allow_targets:
+    - 10.0.0.0/8
+    - 192.168.0.0/16
+
+# 本地登记的代理：首次上线时提交到服务端，管理员审批后生效；
+# 生效配置始终以服务端下发为准。
+proxies:
+  - name: mysql
+    protocol: tcp
+    remote_port: 23306
+    target: 10.1.2.3:3306

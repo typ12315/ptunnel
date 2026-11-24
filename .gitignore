@@ -1,0 +1,12 @@
+bin/
+data/
+*.local.yaml
+server.local.yaml
+client.yaml
+client.crt
+client.key
+dist/
+!internal/server/web/dist/
+!internal/server/web/dist/**
+dist.zip
+web/node_modules/

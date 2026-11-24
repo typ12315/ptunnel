@@ -1,0 +1,22 @@
+[Unit]
+Description=PortTunnel Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ptunnel
+Group=ptunnel
+WorkingDirectory=/opt/ptunnel
+ExecStart=/opt/ptunnel/ptunnel-server -c /opt/ptunnel/server.yaml
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/ptunnel/data
+
+[Install]
+WantedBy=multi-user.target

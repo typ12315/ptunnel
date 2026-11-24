@@ -1,0 +1,59 @@
+# PortTunnel 服务端配置示例
+server:
+  # 隧道端口：客户端接入（mTLS）与客户端证书注册共用此端口，按 ALPN 分流
+  tunnel_addr: 0.0.0.0:8443
+  # 管理面 HTTPS 端口（首次启动自动生成自签证书，浏览器需信任或忽略警告）
+  admin_addr: 0.0.0.0:9443
+  # 代理端口默认绑定地址
+  public_bind: 0.0.0.0
+  # 允许对外映射的端口范围
+  port_range: [20000, 30000]
+  # 自动生成的隧道/管理证书包含的域名或 IP（客户端用域名访问时必须包含该域名）
+  tunnel_cert_hosts: ["localhost", "127.0.0.1"]
+  # 可选 pprof 调试端口（默认关闭，建议只监听 127.0.0.1 或内网）
+  # pprof_addr: 127.0.0.1:6060
+
+storage:
+  # 数据库驱动：sqlite（本地嵌入，默认）/ mysql
+  driver: sqlite
+  data_dir: ./data
+  # driver=sqlite 时生效，留空则使用 data_dir/ptunnel.db
+  sqlite_path: ""
+  # driver=mysql 时生效，需自行创建库并授权，表结构首次启动自动迁移
+  mysql:
+    dsn: "ptunnel:ptunnel@tcp(127.0.0.1:3306)/ptunnel?charset=utf8mb4&parseTime=true&loc=Local"
+    max_open_conns: 20
+    max_idle_conns: 10
+    conn_max_lifetime: 30m
+
+auth:
+  session_ttl: 12h
+  # 每 IP 每分钟登录失败上限，超过后锁定 1 分钟
+  login_rate_limit: 10
+
+tunnel:
+  heartbeat: 15s
+  idle_timeout: 5m
+  handshake_timeout: 10s
+  # 一端结束后等待另一方向收尾的时长；短连接多时可调小，0 表示立即关闭
+  half_close_grace: 500ms
+  # 客户端本地登记的代理是否自动通过审批
+  auto_approve_local: false
+  max_conns_per_proxy: 0
+
+audit:
+  # full 全量记录 / sample 采样 / off 关闭
+  conn_log_mode: full
+  conn_log_sample_rate: 1
+  conn_log_retention_days: 30
+  conn_log_queue_size: 10000
+  # 是否查询系统邻居表获取来源 MAC（仅同网段可用）
+  mac_lookup: true
+  mac_cache_ttl: 60s
+  # SQL 语句审计（仅对绑定了应用类型的代理生效），按天写本地文件、次日 gzip
+  sql_log_enabled: true
+  # 留空则使用 data_dir/sqllogs
+  sql_log_dir: ""
+  sql_log_retention_days: 30
+  # 单条语句最大记录字符数
+  sql_statement_max_len: 4096
