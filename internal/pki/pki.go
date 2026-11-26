@@ -130,11 +130,8 @@ func (ca *CA) IssueClientCert(csrPEM []byte, commonName string, ttl time.Duratio
 	now := time.Now()
 	tpl := &x509.Certificate{
 		SerialNumber: serial,
-		Subject: pkix.Name{
-			CommonName:   commonName,
-			Organization: []string{"PortTunnel Client"},
-		},
-		NotBefore:   now.Add(-time.Hour),
+		Subject:      pkix.Name{CommonName: commonName},
+		NotBefore:    now.Add(-time.Hour),
 		NotAfter:    now.Add(ttl),
 		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
@@ -158,7 +155,7 @@ func (ca *CA) EnsureServerCert(dir, prefix string, hosts []string, ttl time.Dura
 	keyPath := filepath.Join(dir, prefix+".key")
 	if pair, err := tls.LoadX509KeyPair(certPath, keyPath); err == nil && len(pair.Certificate) > 0 {
 		if leaf, err := x509.ParseCertificate(pair.Certificate[0]); err == nil &&
-			certCoversHosts(leaf, hosts) && time.Until(leaf.NotAfter) > 30*24*time.Hour {
+			certProfileOK(leaf) && certCoversHosts(leaf, hosts) && time.Until(leaf.NotAfter) > 30*24*time.Hour {
 			return pair, nil
 		}
 	}
@@ -172,11 +169,12 @@ func (ca *CA) EnsureServerCert(dir, prefix string, hosts []string, ttl time.Dura
 	}
 	tpl := &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: firstHost(hosts), Organization: []string{"PortTunnel"}},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(ttl),
-		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		// 主体只保留 CN，不写入组织名等产品标识，避免随证书外泄。
+		Subject:     pkix.Name{CommonName: firstHost(hosts)},
+		NotBefore:   time.Now().Add(-time.Hour),
+		NotAfter:    time.Now().Add(ttl),
+		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
 	seenIP := map[string]bool{}
 	seenDNS := map[string]bool{}
@@ -341,11 +339,17 @@ func certCoversHosts(leaf *x509.Certificate, hosts []string) bool {
 	return true
 }
 
+// certProfileOK 判断已签发证书的主体是否符合当前规范：主体中不应包含组织名，
+// 以免产品标识随证书外泄（TLS 1.2 下证书为明文）。旧版本签发的证书会因此被重签。
+func certProfileOK(leaf *x509.Certificate) bool {
+	return len(leaf.Subject.Organization) == 0
+}
+
 func firstHost(hosts []string) string {
 	for _, h := range hosts {
 		if strings.TrimSpace(h) != "" {
 			return h
 		}
 	}
-	return "ptunnel"
+	return "localhost"
 }

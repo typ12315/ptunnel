@@ -19,6 +19,7 @@ import (
 	"ptunnel/internal/config"
 	"ptunnel/internal/ops"
 	"ptunnel/internal/pki"
+	"ptunnel/internal/release"
 	"ptunnel/internal/server/clientmgr"
 	"ptunnel/internal/server/portmgr"
 	"ptunnel/internal/server/proxy"
@@ -43,6 +44,7 @@ type Server struct {
 	sqlw  *sqllog.Writer
 	sess  *auth.SessionManager
 	ca    *pki.CA
+	rel   *release.Manager
 	log   *slog.Logger
 	proc  *ops.Collector
 
@@ -62,7 +64,7 @@ type loginState struct {
 // New 创建管理面服务。
 func New(cfg *config.ServerConfig, st *store.Store, mgr *clientmgr.Manager, ports *portmgr.Registry,
 	ph *proxy.Handler, aw *audit.Writer, sqlw *sqllog.Writer, sess *auth.SessionManager, ca *pki.CA,
-	logger *slog.Logger, version string) *Server {
+	rel *release.Manager, logger *slog.Logger, version string) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	procs := ops.NewCollector()
 	procs.Sample() // 预热采样，首次接口调用即可得到 CPU 百分比
@@ -76,6 +78,7 @@ func New(cfg *config.ServerConfig, st *store.Store, mgr *clientmgr.Manager, port
 		sqlw:       sqlw,
 		sess:       sess,
 		ca:         ca,
+		rel:        rel,
 		log:        logger,
 		proc:       procs,
 		startedAt:  time.Now(),
@@ -98,6 +101,7 @@ func (s *Server) ClientHandler() http.Handler {
 	api := r.Group("/api")
 	api.POST("/enroll", s.handleEnroll)
 	api.POST("/client/cert/renew", s.handleRenewCert)
+	api.GET("/client/upgrade/artifact", s.handleDownloadArtifact)
 	return r
 }
 
@@ -173,6 +177,11 @@ func (s *Server) buildRouter() *gin.Engine {
 		authed.POST("/clients/:id/enroll-token", s.handleNewToken)
 		authed.POST("/clients/:id/revoke-cert", s.handleRevokeCert)
 		authed.GET("/clients/:id/pending", s.handlePendingProxies)
+		authed.POST("/clients/:id/upgrade", s.handleUpgradeClient)
+
+		authed.GET("/releases", s.handleListReleases)
+		authed.POST("/releases", s.handleUploadRelease)
+		authed.DELETE("/releases/:id", s.handleDeleteRelease)
 
 		authed.GET("/proxies", s.handleListProxies)
 		authed.POST("/proxies", s.handleCreateProxy)

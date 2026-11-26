@@ -8,17 +8,28 @@ import (
 	"github.com/google/uuid"
 
 	"ptunnel/internal/auth"
+	"ptunnel/internal/release"
+	"ptunnel/internal/server/clientmgr"
 	"ptunnel/internal/store"
 )
 
 type clientDTO struct {
 	*store.Client
-	Online       bool `json:"online"`
-	ProxyCount   int  `json:"proxy_count"`
-	PendingCount int  `json:"pending_count"`
+	Online        bool                    `json:"online"`
+	ProxyCount    int                     `json:"proxy_count"`
+	PendingCount  int                     `json:"pending_count"`
+	LatestVersion string                  `json:"latest_version"`
+	Upgradable    bool                    `json:"upgradable"`
+	Upgrade       *clientmgr.UpgradeState `json:"upgrade,omitempty"`
 }
 
 func (s *Server) toClientDTO(c *store.Client) clientDTO {
+	idx, _ := s.rel.Index()
+	return s.toClientDTOWith(c, idx)
+}
+
+// toClientDTOWith 使用预取的版本索引构造 DTO，避免列表接口逐行查询升级包。
+func (s *Server) toClientDTOWith(c *store.Client, idx map[string]string) clientDTO {
 	proxies, _ := s.st.ListProxies(c.ID)
 	pending := 0
 	for _, p := range proxies {
@@ -26,7 +37,16 @@ func (s *Server) toClientDTO(c *store.Client) clientDTO {
 			pending++
 		}
 	}
-	return clientDTO{Client: c, Online: s.mgr.IsOnline(c.ID), ProxyCount: len(proxies), PendingCount: pending}
+	latest := idx[c.OS+"/"+c.Arch]
+	return clientDTO{
+		Client:        c,
+		Online:        s.mgr.IsOnline(c.ID),
+		ProxyCount:    len(proxies),
+		PendingCount:  pending,
+		LatestVersion: latest,
+		Upgradable:    release.IsUpgradeable(c.Version, latest),
+		Upgrade:       s.mgr.UpgradeStateFor(c.ID),
+	}
 }
 
 func (s *Server) handleListClients(c *gin.Context) {
@@ -36,8 +56,9 @@ func (s *Server) handleListClients(c *gin.Context) {
 		return
 	}
 	out := make([]clientDTO, 0, len(list))
+	idx, _ := s.rel.Index()
 	for _, cl := range list {
-		out = append(out, s.toClientDTO(cl))
+		out = append(out, s.toClientDTOWith(cl, idx))
 	}
 	c.JSON(http.StatusOK, gin.H{"items": out, "total": len(out)})
 }

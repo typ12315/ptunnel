@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/hashicorp/yamux"
 
+	"ptunnel/internal/release"
 	"ptunnel/internal/store"
 	"ptunnel/internal/tunnel"
 )
@@ -55,6 +56,7 @@ type Manager struct {
 
 	mu       sync.RWMutex
 	sessions map[string]*Session
+	upgrades map[string]*UpgradeState
 
 	// OnProxiesRegistered 在客户端本地代理登记为「已通过」后触发，用于同步端口监听。
 	OnProxiesRegistered func()
@@ -77,7 +79,7 @@ func New(st *store.Store, logger *slog.Logger, opts Options) *Manager {
 	if opts.PublicBind == "" {
 		opts.PublicBind = "0.0.0.0"
 	}
-	return &Manager{st: st, log: logger, opts: opts, sessions: map[string]*Session{}}
+	return &Manager{st: st, log: logger, opts: opts, sessions: map[string]*Session{}, upgrades: map[string]*UpgradeState{}}
 }
 
 // PeerClientID 从 TLS 连接状态中取出客户端 ID（证书 CN）。
@@ -147,6 +149,7 @@ func (m *Manager) Attach(conn net.Conn) error {
 	}
 
 	m.st.SetClientSeen(client.ID, hello.Version, hello.OS, hello.Arch, conn.RemoteAddr().String())
+	m.markUpgraded(client.ID, hello.Version)
 	m.registerLocalProxies(client, hello.Proxies)
 
 	sess := &Session{
@@ -199,6 +202,16 @@ func (m *Manager) Attach(conn net.Conn) error {
 		case tunnel.MsgStats:
 			// 统计以服务端本地计数为准，此处仅作为保活信号
 			sess.lastPong.Store(time.Now().UnixMilli())
+		case tunnel.MsgUpgradeResult:
+			var res tunnel.UpgradeResult
+			if json.Unmarshal(payload, &res) == nil {
+				status, msg := "ok", res.Message
+				if !res.OK {
+					status = "failed"
+				}
+				m.setUpgrade(client.ID, &UpgradeState{Target: res.Version, Status: status, Message: msg, At: time.Now()})
+				m.log.Info("客户端升级结果", "client", client.Name, "status", status, "target", res.Version, "msg", msg)
+			}
 		case tunnel.MsgPing:
 			var p tunnel.Ping
 			_ = json.Unmarshal(payload, &p)
@@ -486,6 +499,66 @@ func (m *Manager) KickAll(retryAfter int) {
 			continue
 		}
 		_ = sess.ctrl.Send(tunnel.MsgServerShutdown, tunnel.ServerShutdown{RetryAfterSec: retryAfter})
+	}
+}
+
+// UpgradeState 客户端最近一次在线升级的执行状态（内存态，服务端重启后清空）。
+type UpgradeState struct {
+	Target  string    `json:"target"`
+	Status  string    `json:"status"` // pending / ok / failed
+	Message string    `json:"message,omitempty"`
+	At      time.Time `json:"at"`
+}
+
+// SendUpgrade 向在线客户端下发升级指令。
+func (m *Manager) SendUpgrade(clientID string, up tunnel.Upgrade) error {
+	s := m.Get(clientID)
+	if s == nil {
+		return fmt.Errorf("客户端不在线")
+	}
+	if err := s.ctrl.Send(tunnel.MsgUpgrade, up); err != nil {
+		return err
+	}
+	m.setUpgrade(clientID, &UpgradeState{Target: up.Version, Status: "pending", At: time.Now()})
+	return nil
+}
+
+// UpgradeStateFor 返回客户端最近一次升级状态，没有则返回 nil。
+func (m *Manager) UpgradeStateFor(clientID string) *UpgradeState {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	st := m.upgrades[clientID]
+	if st == nil {
+		return nil
+	}
+	cp := *st
+	return &cp
+}
+
+func (m *Manager) setUpgrade(clientID string, st *UpgradeState) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// 客户端回报的结果可能不带版本号，此时沿用原目标版本
+	if st.Target == "" {
+		if old := m.upgrades[clientID]; old != nil {
+			st.Target = old.Target
+		}
+	}
+	m.upgrades[clientID] = st
+}
+
+// markUpgraded 在客户端重连上报的版本达到升级目标时，把状态收敛为成功。
+func (m *Manager) markUpgraded(clientID, version string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st := m.upgrades[clientID]
+	if st == nil || st.Target == "" || st.Status == "ok" {
+		return
+	}
+	if release.Compare(version, st.Target) >= 0 {
+		st.Status = "ok"
+		st.Message = ""
+		st.At = time.Now()
 	}
 }
 

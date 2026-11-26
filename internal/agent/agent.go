@@ -46,6 +46,8 @@ type Agent struct {
 	mu      sync.RWMutex
 	specs   map[string]tunnel.ProxySpec
 	counter map[string]*proxyCounter
+
+	upgrading atomic.Bool
 }
 
 // New 创建客户端。
@@ -244,6 +246,10 @@ func extractErr(data []byte) string {
 }
 
 func (a *Agent) httpClient(serverName string) (*http.Client, error) {
+	return a.httpClientTimeout(serverName, 20*time.Second)
+}
+
+func (a *Agent) httpClientTimeout(serverName string, timeout time.Duration) (*http.Client, error) {
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
 	if a.cfg.Server.Fingerprint != "" {
 		want := strings.ToLower(strings.TrimPrefix(a.cfg.Server.Fingerprint, "sha256:"))
@@ -272,7 +278,7 @@ func (a *Agent) httpClient(serverName string) (*http.Client, error) {
 		tlsCfg.Certificates = []tls.Certificate{cert}
 	}
 	transport := &http.Transport{TLSClientConfig: tlsCfg}
-	return &http.Client{Transport: transport, Timeout: 20 * time.Second}, nil
+	return &http.Client{Transport: transport, Timeout: timeout}, nil
 }
 
 func loadPool(caPath string) (*x509.CertPool, error) {
@@ -297,8 +303,9 @@ func (a *Agent) tunnelTLSConfig() (*tls.Config, error) {
 	}
 	cfg := &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
-		NextProtos:   []string{tunnel.ALPN},
+		// 强制 TLS 1.3：1.2 下服务端证书为明文，其主体会随抓包外泄。
+		MinVersion: tls.VersionTLS13,
+		NextProtos: []string{tunnel.ALPN, tunnel.ALPNLegacy},
 	}
 	host, _, _ := net.SplitHostPort(a.cfg.Server.Addr)
 	cfg.ServerName = host
@@ -322,7 +329,7 @@ func (a *Agent) session(ctx context.Context) error {
 		return fmt.Errorf("连接服务端失败: %w", err)
 	}
 	defer conn.Close()
-	if got := conn.ConnectionState().NegotiatedProtocol; got != tunnel.ALPN {
+	if got := conn.ConnectionState().NegotiatedProtocol; !tunnel.IsTunnelALPN(got) {
 		return fmt.Errorf("服务端 ALPN 不匹配: %q", got)
 	}
 
@@ -391,6 +398,13 @@ func (a *Agent) session(ctx context.Context) error {
 			var k tunnel.Kick
 			_ = json.Unmarshal(payload, &k)
 			return fmt.Errorf("被服务端断开: %s", k.Reason)
+		case tunnel.MsgUpgrade:
+			var u tunnel.Upgrade
+			if err := json.Unmarshal(payload, &u); err != nil {
+				continue
+			}
+			a.log.Info("收到升级指令", "version", u.Version, "arch", u.Arch, "size", u.Size)
+			go a.handleUpgrade(ctrl, u)
 		case tunnel.MsgServerShutdown:
 			return fmt.Errorf("服务端正在关闭")
 		}

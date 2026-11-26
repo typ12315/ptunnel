@@ -14,8 +14,8 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -23,6 +23,7 @@ import (
 	"ptunnel/internal/auth"
 	"ptunnel/internal/config"
 	"ptunnel/internal/pki"
+	"ptunnel/internal/release"
 	"ptunnel/internal/server/api"
 	"ptunnel/internal/server/clientmgr"
 	"ptunnel/internal/server/portmgr"
@@ -178,7 +179,11 @@ func run(cfgPath string, logger *slog.Logger) error {
 		return fmt.Errorf("加载会话密钥失败: %w", err)
 	}
 	sessMgr := auth.NewSessionManager(sessKey, cfg.Auth.SessionTTL.D())
-	apiSrv := api.New(cfg, st, mgr, ports, ph, aw, sqlw, sessMgr, ca, logger, version)
+	rel, err := release.New(st, filepath.Join(cfg.Storage.DataDir, "releases"))
+	if err != nil {
+		return fmt.Errorf("初始化升级包目录失败: %w", err)
+	}
+	apiSrv := api.New(cfg, st, mgr, ports, ph, aw, sqlw, sessMgr, ca, rel, logger, version)
 
 	// 客户端本地登记并自动通过审批后，需要重建端口监听
 	mgr.OnProxiesRegistered = apiSrv.SyncPorts
@@ -192,10 +197,11 @@ func run(cfgPath string, logger *slog.Logger) error {
 	// 隧道端口：同时承载 mTLS 隧道与注册接口（按 ALPN 分流）
 	tlsCfg := &tls.Config{
 		Certificates: []tls.Certificate{tunnelCert},
-		MinVersion:   tls.VersionTLS12,
-		ClientAuth:   tls.VerifyClientCertIfGiven,
-		ClientCAs:    ca.Pool,
-		NextProtos:   []string{tunnel.ALPN, "http/1.1"},
+		// 强制 TLS 1.3：1.2 下服务端证书是明文，证书主体会随抓包外泄。
+		MinVersion: tls.VersionTLS13,
+		ClientAuth: tls.VerifyClientCertIfGiven,
+		ClientCAs:  ca.Pool,
+		NextProtos: []string{tunnel.ALPN, tunnel.ALPNLegacy, "http/1.1"},
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 			if len(rawCerts) == 0 {
 				return nil // 注册接口允许无客户端证书
@@ -383,7 +389,7 @@ func (l *alpnListener) Accept() (net.Conn, error) {
 			continue
 		}
 		_ = tc.SetDeadline(time.Time{})
-		if strings.EqualFold(tc.ConnectionState().NegotiatedProtocol, tunnel.ALPN) {
+		if tunnel.IsTunnelALPN(tc.ConnectionState().NegotiatedProtocol) {
 			if len(tc.ConnectionState().PeerCertificates) == 0 {
 				_ = tc.Close()
 				continue

@@ -7,12 +7,25 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 )
 
 // ALPN 隧道协议标识。
-const ALPN = "ptunnel/1"
+//
+// 刻意复用 "h2" 而非自有字符串：ALPN 位于 TLS ClientHello 明文中，抓包可直接
+// 读出，使用自有标识会让隧道流量一眼可辨。复用 "h2" 后，握眼见与普通 HTTP/2
+// 长连接一致。
+const ALPN = "h2"
+
+// ALPNLegacy 为历史标识，仅用于滚动升级期间兼容旧客户端/旧服务端。
+const ALPNLegacy = "ptunnel/1"
+
+// IsTunnelALPN 判断协商出的 ALPN 是否为隧道协议（含升级期兼容标识）。
+func IsTunnelALPN(proto string) bool {
+	return strings.EqualFold(proto, ALPN) || strings.EqualFold(proto, ALPNLegacy)
+}
 
 // StreamVersion 数据流头版本。
 const StreamVersion byte = 1
@@ -110,6 +123,22 @@ type ServerShutdown struct {
 	RetryAfterSec int `json:"retry_after_sec"`
 }
 
+// Upgrade 服务端下发的在线升级指令。
+type Upgrade struct {
+	Version string `json:"version"`
+	OS      string `json:"os"`
+	Arch    string `json:"arch"`
+	Size    int64  `json:"size"`
+	SHA256  string `json:"sha256"`
+}
+
+// UpgradeResult 客户端升级执行结果（成功时客户端随后重启并重连）。
+type UpgradeResult struct {
+	Version string `json:"version"`
+	OK      bool   `json:"ok"`
+	Message string `json:"message,omitempty"`
+}
+
 // 控制消息类型。
 const (
 	MsgHello          = "hello"
@@ -121,6 +150,8 @@ const (
 	MsgPong           = "pong"
 	MsgKick           = "kick"
 	MsgServerShutdown = "server_shutdown"
+	MsgUpgrade        = "upgrade"
+	MsgUpgradeResult  = "upgrade_result"
 )
 
 type envelope struct {
